@@ -129,8 +129,10 @@ impl NodeEfficiency {
 
 /// Node-level efficiency for a snapshot, or `None` when it cannot be stated.
 ///
-/// Throughput is summed over instances with a finite `gen_tps` (a single
-/// NaN/Inf must not poison the node), power over every GPU's board power. It is
+/// Throughput is summed over instances with a finite, live `gen_tps` (a single
+/// NaN/Inf must not poison the node, and a Lemonade last-request rate, which
+/// stays unchanged while the server is idle, is not current throughput: see
+/// [`Instance::live_gen_tps`]), power over every GPU's board power. It is
 /// `None` with no traffic (`Σ gen_tps == 0`), no power telemetry
 /// (`Σ power_w == 0`), or a non-finite quotient. Power here is the whole board,
 /// including GPUs no instance occupies, because the question is the node's
@@ -142,7 +144,7 @@ pub fn node_efficiency(snap: &Snapshot) -> Option<NodeEfficiency> {
     let mut held = false;
     let mut unknown = false;
     for inst in &snap.instances {
-        let Some(v) = inst.gen_tps.filter(|v| v.is_finite()) else {
+        let Some(v) = inst.live_gen_tps() else {
             continue;
         };
         tps += v;
@@ -232,6 +234,32 @@ mod tests {
             }),
             ..Instance::default()
         }
+    }
+
+    /// An idle Lemonade server keeps reporting its last request's rate. Counted as
+    /// throughput it would hold the node figure up long after traffic stopped, and
+    /// mark it held while it lasted.
+    #[test]
+    fn node_efficiency_leaves_out_a_last_request_rate() {
+        let mut idle = serving("lemonade", Some(500.0), Some(ObservationFreshness::Held));
+        idle.gen_tps_last_request = true;
+        let live = serving("vllm", Some(30.0), Some(ObservationFreshness::Fresh));
+        let node = node_efficiency(&snap_with(
+            vec![idle.clone(), live],
+            vec![gpu("gpu-0", 100.0)],
+        ))
+        .expect("the live rate is traffic");
+        // Only the live 30 tok/s counts: 30 / 100 W, not 530 / 100 W.
+        assert!((node.tokens_per_watt - 0.3).abs() < 1e-9, "{node:?}");
+        assert!(
+            !node.held(),
+            "a held last-request rate must not mark the figure held"
+        );
+        // An idle Lemonade server alone is no traffic at all.
+        assert_eq!(
+            node_efficiency(&snap_with(vec![idle], vec![gpu("gpu-0", 100.0)])),
+            None
+        );
     }
 
     #[test]

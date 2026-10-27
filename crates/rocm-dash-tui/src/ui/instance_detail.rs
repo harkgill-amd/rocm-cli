@@ -362,7 +362,10 @@ fn render_summary(
                 Style::default().fg(theme.accent),
             ),
             Span::raw("  "),
-            Span::styled("gen: ", muted),
+            Span::styled(
+                format!("{}: ", format::gen_rate_label(inst.gen_tps_last_request)),
+                muted,
+            ),
             Span::styled(
                 format::gen_tps_compact(inst.gen_tps, inst.gen_tps_observation.as_ref()),
                 fg,
@@ -600,7 +603,8 @@ fn render_footer(f: &mut Frame, area: Rect, inst: &Instance, theme: &Theme, scro
 mod tests {
     use super::*;
     use crate::ui::tabs::instances::tests::{
-        SNAP_SECS, buffer_text, mk_inst, mk_inst_obs, mk_snap, mk_state, obs, state_with_snap,
+        SNAP_SECS, buffer_text, last_req_inst, mk_inst, mk_inst_obs, mk_snap, mk_state, obs,
+        state_with_snap,
     };
     use chrono::TimeZone;
     use rocm_dash_core::metrics::{ObservationFreshness, ObservationMetadata};
@@ -1016,6 +1020,26 @@ mod tests {
              content is actually rendered at, not from a width-0 measurement \
              that never happens on screen"
         );
+    }
+
+    #[test]
+    fn detail_names_a_last_request_rate() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for (last_request, label) in [(true, "last req: 37.5 tok/s"), (false, "gen: 37.5 tok/s")] {
+            let state = state_with_snap(last_req_inst("rate-detail", last_request));
+            let mut term = Terminal::new(TestBackend::new(160, 48)).unwrap();
+            term.draw(|f| {
+                draw_detail(f, f.area(), &state, &state.theme);
+            })
+            .unwrap();
+            let out = buffer_text(&term);
+            assert!(out.contains(label), "{label:?} missing:\n{out}");
+            assert_eq!(out.contains("last req:"), last_request, "{out}");
+            // The value already carries its unit, so the label must not repeat it.
+            assert!(!out.contains("tok/s:"), "unit doubled:\n{out}");
+        }
     }
 
     #[test]
