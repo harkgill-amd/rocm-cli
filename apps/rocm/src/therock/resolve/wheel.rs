@@ -44,6 +44,7 @@ use super::super::source::{
 };
 use super::super::version::{
     ParsedVersion, compare_version_strings, is_stable_runtime_version, parse_version,
+    stable_release_line_pin,
 };
 use crate::runtime_registry::WheelRuntimeComposition;
 use anyhow::{Context, Result, bail};
@@ -682,12 +683,7 @@ pub(in crate::therock) fn resolve_pip_runtime_with_timeout(
         download_timeout_secs,
     )
     .with_context(|| {
-        format!(
-            "failed to resolve TheRock {} wheel runtime from canonical source {}\n\n{}",
-            channel.as_str(),
-            source.index_url,
-            canonical_wheel_resolution_hint(channel)
-        )
+        wheel_resolution_failure_context(channel, layout, &source.index_url, version_selector)
     })
 }
 
@@ -1364,8 +1360,67 @@ fn canonical_wheel_resolution_hint(channel: TheRockChannel) -> String {
     hint
 }
 
+/// The sentence appended when wheel resolution fails.
+///
+/// A ROCm >= 10 pin already refused `--channel nightly` before resolution
+/// (`select_source_layout`), so the canonical hint's nightly suggestion must
+/// not be what that failure prints. The next-layout branch points at the
+/// layout that was searched, a full version, and an exact `--family`.
+fn wheel_resolution_failure_context(
+    channel: TheRockChannel,
+    layout: SourceLayout,
+    index_url: &str,
+    version_selector: Option<&RuntimeVersionSelector>,
+) -> String {
+    let (source_label, hint) = match layout {
+        SourceLayout::Next => (
+            "next-layout source",
+            next_layout_unsatisfied_hint(version_selector),
+        ),
+        SourceLayout::Canonical => ("canonical source", canonical_wheel_resolution_hint(channel)),
+    };
+    format!(
+        "failed to resolve TheRock {} wheel runtime from {source_label} {index_url}\n\n{hint}",
+        channel.as_str()
+    )
+}
+
+/// Recovery guidance when a ROCm >= 10 pin cannot be satisfied on the next layout.
+///
+/// Does not offer `--channel nightly`: that channel refuses these pins, and
+/// the refusal tells the user to come back to the release channel.
+pub(in crate::therock) fn next_layout_unsatisfied_hint(
+    version_selector: Option<&RuntimeVersionSelector>,
+) -> String {
+    let requested = version_selector.map_or_else(
+        || "the requested release".to_owned(),
+        RuntimeVersionSelector::describe,
+    );
+    let version_clause = match version_selector {
+        Some(RuntimeVersionSelector::Version(version)) => {
+            if let Some((major, minor)) = stable_release_line_pin(version) {
+                format!(
+                    "Re-run with a full version in that line, such as `--version {major}.{minor}.0`, and an exact GPU arch, for example `--family gfx1200`."
+                )
+            } else {
+                format!(
+                    "Re-run with that full version and an exact GPU arch, for example `--version {version} --family gfx1200`."
+                )
+            }
+        }
+        _ => "Re-run with a full version such as `--version 10.0.0` and an exact GPU arch, for example `--family gfx1200`."
+            .to_owned(),
+    };
+    format!(
+        "No complete compatible package stack was found for {requested} on the ROCm {THEROCK_NEXT_MIN_MAJOR}+ next layout. {version_clause}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::super::source::{
+        THEROCK_NEXT_PIP_INDEX_BASE, THEROCK_RELEASE_PIP_INDEX_BASE,
+    };
     use super::super::super::test_support::test_runtime_manifest;
     use super::*;
     use crate::runtime_registry::{InstalledRuntimeManifest, wheel_composition_includes_devel};
@@ -2321,5 +2376,55 @@ mod tests {
         if !runtime_is_windows() {
             assert!(hint.contains("--format tarball"));
         }
+    }
+
+    /// The wording is produced by [`wheel_resolution_failure_context`], which
+    /// `resolve_pip_runtime_with_timeout` appends when resolution fails. The
+    /// install that prints it is `@id:therock-next-17-unsatisfied-line-pin-skips-nightly`.
+    #[test]
+    fn unsatisfied_rocm_10_line_pin_does_not_suggest_nightly() {
+        let line = RuntimeVersionSelector::version("10.1").unwrap();
+        let message = wheel_resolution_failure_context(
+            TheRockChannel::Release,
+            SourceLayout::Next,
+            THEROCK_NEXT_PIP_INDEX_BASE,
+            Some(&line),
+        );
+        assert!(
+            !message.contains("nightly"),
+            "a ROCm 10 pin must not be told to try nightly: {message}"
+        );
+        assert!(message.contains("next layout"), "{message}");
+        assert!(message.contains(THEROCK_NEXT_PIP_INDEX_BASE), "{message}");
+        assert!(message.contains("--version 10.1.0"), "{message}");
+        assert!(message.contains("--family gfx1200"), "{message}");
+
+        let exact = RuntimeVersionSelector::version("10.1.0").unwrap();
+        let exact_message = wheel_resolution_failure_context(
+            TheRockChannel::Release,
+            SourceLayout::Next,
+            THEROCK_NEXT_PIP_INDEX_BASE,
+            Some(&exact),
+        );
+        assert!(!exact_message.contains("nightly"), "{exact_message}");
+        assert!(
+            exact_message.contains("--version 10.1.0"),
+            "{exact_message}"
+        );
+        assert!(
+            exact_message.contains("--family gfx1200"),
+            "{exact_message}"
+        );
+
+        // Canonical misses keep the other-channel hint. The 10.1 advice is the
+        // next-layout branch, not a rewrite of every resolution error.
+        let canonical = wheel_resolution_failure_context(
+            TheRockChannel::Release,
+            SourceLayout::Canonical,
+            THEROCK_RELEASE_PIP_INDEX_BASE,
+            None,
+        );
+        assert!(canonical.contains("--channel nightly"), "{canonical}");
+        assert!(canonical.contains("canonical source"), "{canonical}");
     }
 }
