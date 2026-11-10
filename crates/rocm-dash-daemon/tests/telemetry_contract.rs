@@ -811,6 +811,129 @@ esac
     );
 }
 
+// ── Managed-service VRAM attribution by process ancestry (ROCMAI-941) ───────
+
+/// A real child of `parent`, found through `/proc`, once the shell has forked it.
+#[cfg(target_os = "linux")]
+fn first_child_of(parent: u32) -> u32 {
+    for _ in 0..100 {
+        if let Ok(kids) = std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
+            && let Some(pid) = kids.split_whitespace().next().and_then(|p| p.parse().ok())
+        {
+            return pid;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("process {parent} never forked a child");
+}
+
+/// Two fake "engine" processes, killed on drop, so a panic while waiting for a
+/// fork (or in any assert) does not leave the shells and their sleeping
+/// children behind.
+#[cfg(target_os = "linux")]
+struct Engines([std::process::Child; 2]);
+
+#[cfg(target_os = "linux")]
+impl Drop for Engines {
+    fn drop(&mut self) {
+        for e in &mut self.0 {
+            let _ = e.kill();
+            let _ = e.wait();
+        }
+    }
+}
+
+/// Contract: GPU processes that `amd-smi` lists are attributed to the managed
+/// service they descend from, by walking parent links to the PID rocm-cli
+/// recorded for it. Two services share one 400 W GPU; each gets its own VRAM
+/// (not the whole device) and a power share weighted by it, and the dashboard
+/// raises no "vram attribution" warning for them.
+///
+/// Uses real processes: each "engine" is a shell with a real child standing in
+/// for a GPU worker, so the `/proc/<pid>/stat` walk is the production one.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn managed_services_get_their_own_vram_and_a_weighted_power_split() {
+    use rocm_core::fake_executable::write_fake_executable;
+    use std::process::{Command, Stdio};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let services_dir = tmp.path().join("services");
+    std::fs::create_dir_all(&services_dir).unwrap();
+
+    // `; true` stops the shell exec-ing straight into `sleep`, so it really forks.
+    let spawn_engine = || {
+        Command::new("sh")
+            .args(["-c", "sleep 120; true"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake engine")
+    };
+    let engines = Engines([spawn_engine(), spawn_engine()]);
+    let workers: Vec<u32> = engines.0.iter().map(|e| first_child_of(e.id())).collect();
+
+    for (id, engine) in ["own-a", "own-b"].iter().zip(&engines.0) {
+        let json = format!(
+            r#"{{"service_id":"{id}","engine":"vllm","model_ref":"M/{id}","canonical_model_id":"M/{id}","host":"127.0.0.1","port":9,"status":"ready","gpu_indices":[0],"engine_pid":{},"created_at_unix_ms":0}}"#,
+            engine.id()
+        );
+        std::fs::write(services_dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    let fake = tmp.path().join("amd-smi-fake");
+    write_fake_executable(
+        &fake,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+  metric) echo '{{"gpu_data":[{{"gpu":0,"mem_usage":{{"used_vram":{{"value":4000}},"total_vram":{{"value":8000}}}},"usage":{{"gfx_activity":{{"value":50}}}},"temperature":{{"hotspot":{{"value":60}}}},"power":{{"socket_power":{{"value":400.0,"unit":"W"}}}}}}]}}' ;;
+  process) echo '{{"gpu_data":[{{"gpu":0,"process_list":[{{"process_info":{{"pid":{a},"memory_usage":{{"vram_mem":{{"value":3000,"unit":"MB"}}}}}}}},{{"process_info":{{"pid":{b},"memory_usage":{{"vram_mem":{{"value":1000,"unit":"MB"}}}}}}}}]}}]}}' ;;
+  *) echo '{{}}' ;;
+esac
+"#,
+            a = workers[0],
+            b = workers[1]
+        ),
+    )
+    .unwrap();
+
+    let (tx, mut rx) = broadcast::channel::<Event>(64);
+    let opts = RunnerOptions {
+        amd_smi_binary: Some(fake.into_os_string()),
+        amd_smi_skip_device_preflight: true,
+        ..fast_opts(services_dir)
+    };
+    let _runner = spawn_runner(tx, opts).await;
+
+    let seen = wait_for_snapshot(&mut rx, |snap| {
+        let get = |id: &str| snap.instances.iter().find(|i| i.container_id == id);
+        let (a, b) = (get("own-a")?, get("own-b")?);
+        Some((
+            a.vram_used_mb,
+            b.vram_used_mb,
+            a.power_w?,
+            b.power_w?,
+            snap.warnings.clone(),
+        ))
+    })
+    .await;
+
+    drop(engines);
+    let (a_vram, b_vram, a_w, b_w, warnings) =
+        seen.unwrap_or_else(|e| panic!("per-service VRAM and power never appeared: {e}"));
+
+    // Each service shows what its own GPU process holds, not the device total.
+    assert_eq!((a_vram, b_vram), (3000, 1000), "VRAM must be per service");
+    // Power follows that VRAM split of the 400 W board.
+    assert!((a_w - 300.0).abs() < 1e-6, "own-a got {a_w} W");
+    assert!((b_w - 100.0).abs() < 1e-6, "own-b got {b_w} W");
+    assert!(
+        !warnings.iter().any(|w| w.starts_with("vram attribution")),
+        "unexpected vram-attribution warning: {warnings:?}"
+    );
+}
+
 // ── Scenario 5: Omitted counter → None (not zero, not panic) ───────────────
 
 /// Contract: when the `/metrics` endpoint returns HTTP 200 but the body omits

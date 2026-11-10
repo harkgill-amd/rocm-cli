@@ -610,6 +610,7 @@ pub async fn run_loop(
                 Ok(read) => {
                     let disc = crate::registry::discover_managed_services(&read.records);
                     discovery.managed_non_vllm = disc.non_vllm;
+                    discovery.managed_roots = disc.roots;
                     reconcile.reconcile_set(
                         DiscoverySource::Managed,
                         &disc.svcs,
@@ -805,10 +806,18 @@ pub async fn run_loop(
             match g.processes().await {
                 Ok(procs) => {
                     procs_nonempty = !procs.is_empty();
-                    per_container_used = rocm_dash_core::vram::aggregate_process_vram(
-                        &procs,
-                        rocm_dash_collectors::cgroup::container_id_for_pid,
-                    );
+                    // A container id when the process is in a docker/containerd
+                    // cgroup, otherwise the managed service whose engine it
+                    // descends from. Both key the same map the instances read.
+                    per_container_used =
+                        rocm_dash_core::vram::aggregate_process_vram(&procs, |pid| {
+                            rocm_dash_collectors::cgroup::container_id_for_pid(pid).or_else(|| {
+                                rocm_dash_collectors::ancestry::owner_of_pid(
+                                    pid,
+                                    &discovery.managed_roots,
+                                )
+                            })
+                        });
                 }
                 Err(e) => {
                     // Keep the last-known map; device fallback covers the gap.
@@ -1048,6 +1057,10 @@ struct DiscoveryState {
     /// The subset of the registry ids whose engine is NOT vLLM, excluded from
     /// the vLLM Prometheus scrape so they aren't mis-parsed.
     managed_non_vllm: HashSet<String>,
+    /// Ancestry roots of the managed services the registry surfaced, used to
+    /// attribute GPU processes to a service when the cgroup join cannot (a
+    /// managed service is not a container).
+    managed_roots: Vec<rocm_dash_collectors::ancestry::Root>,
     /// The id of the currently-live Lemonade instance, if any.
     lemonade_id: Option<String>,
     /// How the registry reads have been going, so a condition that lasts many
@@ -1064,6 +1077,10 @@ impl DiscoveryState {
     fn keep_through_partial_registry(&mut self, disc: crate::registry::ManagedDiscovery) {
         self.managed_non_vllm.retain(|id| !disc.seen.contains(id));
         self.managed_non_vllm.extend(disc.non_vllm);
+        // Roots of the services this pass saw are replaced; the unseen ones
+        // keep theirs, as their services stay known.
+        self.managed_roots.retain(|r| !disc.seen.contains(&r.owner));
+        self.managed_roots.extend(disc.roots);
         self.known_services.extend(disc.seen);
     }
 }
@@ -2485,6 +2502,55 @@ mod tests {
             id_set(&["old-lemonade", "new-lemonade"]),
             "an unseen non-vLLM service keeps its mark, a seen one follows its record"
         );
+    }
+
+    #[test]
+    fn partial_registry_read_refreshes_the_roots_it_saw_and_keeps_the_unseen() {
+        use rocm_dash_collectors::ancestry::Root;
+        let root = |pid, owner: &str| Root {
+            pid,
+            start_ticks: None,
+            owner: owner.into(),
+        };
+        let mut state = DiscoveryState {
+            known_services: id_set(&["seen", "unseen"]),
+            managed_roots: vec![root(10, "seen"), root(20, "unseen")],
+            ..DiscoveryState::default()
+        };
+
+        // `seen` was relaunched under a new engine pid; `unseen` was not read.
+        state.keep_through_partial_registry(crate::registry::ManagedDiscovery {
+            seen: id_set(&["seen"]),
+            roots: vec![root(11, "seen")],
+            ..Default::default()
+        });
+
+        let mut got: Vec<_> = state
+            .managed_roots
+            .iter()
+            .map(|r| (r.pid, r.owner.as_str()))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![(11, "seen"), (20, "unseen")],
+            "a seen service's roots are replaced, an unseen one's survive"
+        );
+    }
+
+    #[test]
+    fn partial_registry_read_that_saw_nothing_keeps_every_root() {
+        use rocm_dash_collectors::ancestry::Root;
+        let mut state = DiscoveryState {
+            managed_roots: vec![Root {
+                pid: 10,
+                start_ticks: Some(5),
+                owner: "a".into(),
+            }],
+            ..DiscoveryState::default()
+        };
+        state.keep_through_partial_registry(crate::registry::ManagedDiscovery::default());
+        assert_eq!(state.managed_roots.len(), 1);
     }
 
     #[test]
