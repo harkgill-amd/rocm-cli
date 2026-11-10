@@ -109,10 +109,10 @@ Feature: The ROCm Doctor skill's instructions match the CLI they drive
   # though a raised contract means the catalog removed or changed something. The
   # scenario turns red at that bump, so the skill is read again first.
   #
-  # Whether an agent obeys the stop is behaviour, not text, and no committed
-  # test checks it today. The skill's evals cannot reach it, because their
-  # runners carry no `rocm`. A stub CLI that the evals can use would let them
-  # grade it.
+  # Whether an agent obeys the stop is behaviour, not text. The skill's evals
+  # grade it where they replay a recorded older CLI
+  # (`rocm-older-cli-stops-before-diagnosing`), which needs a model run, so this
+  # scenario holds only the declared number.
   @id:skill-required-contract-is-the-one-the-cli-publishes
   Scenario: skill-07 - The skill requires the same catalog contract that the CLI publishes
     Given the ROCm Doctor skill as it is published
