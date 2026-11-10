@@ -41,7 +41,7 @@ fn reference_md_path() -> PathBuf {
 
 /// `(fix-id, os-scope cell, marker cell)` for every catalog row, taken the same
 /// way `skill_steps::parse_reference_catalog` takes them: a leading `|`, at
-/// least five cells, and a backticked `fix-*` id first.
+/// least five cells, and a backticked `fix-*` or `info-*` id first.
 fn catalog_rows(md: &str) -> Vec<(String, String, String)> {
     let mut rows = Vec::new();
     for line in md.lines() {
@@ -80,19 +80,14 @@ fn skill_md_path() -> PathBuf {
         .join("SKILL.md")
 }
 
-/// How many catalog rows have `yes` in the Auto-fix cell (`cells[4]`, the same
-/// column `catalog_rows` leaves unparsed since the os-scope check only needs
-/// `cells[1]`).
-/// Rows whose marker is anything other than a plain `print-only`, which is the
-/// complement of the set `SKILL.md`'s "the other N are print-only" counts.
+/// How many catalog rows have a marker (the fifth cell, `cells[4]`) other than a
+/// plain `print-only`, which is the complement of the set `SKILL.md`'s "the other
+/// N are print-only" counts.
 ///
-/// Deliberately not a count of "auto-applicable": the two docs do not agree on
-/// what that phrase covers. `reference.md` says three ids are ever
-/// auto-applicable and that `fix-9-igpu-dgpu` is not one of them, while
-/// `SKILL.md` says four -- counting `needs-arg` and the windows-only exception
-/// alongside the two plain `auto` entries. Counting the complement sidesteps
-/// that disagreement and checks the claim `SKILL.md` actually makes, so this
-/// guard does not quietly take a side in it.
+/// Deliberately not a count of "auto-applicable": that phrase is per host, and
+/// `reference.md` lists which ids it covers on each one (three ids across all
+/// hosts, `fix-9-igpu-dgpu` not among them). `SKILL.md` claims a count of
+/// print-only entries, so counting the complement checks that claim.
 fn catalog_not_print_only_count(md: &str) -> usize {
     md.lines()
         .filter(|line| {

@@ -15,8 +15,8 @@ Feature: The ROCm Doctor skill's instructions match the CLI they drive
   #
   # That guarantee covers the table's cells and the auto-applicable prose line —
   # what `skill_steps.rs` actually parses. Free-standing prose that only
-  # restates those same facts in words — the Linux-only/Windows-only recap line
-  # beneath the table, for one — is not parsed here and can go stale even while
+  # restates those same facts in words — the paragraph on the unused `fix-20`
+  # number under the table, for one — is not parsed here and can go stale even while
   # the table itself stays correct. Two such counts are checked by the unit-level
   # `tests/skill_reference.rs` instead: the "(N failure modes)" count in the
   # catalog heading and SKILL.md's "The other M ... print-only" count. Two
@@ -81,10 +81,10 @@ Feature: The ROCm Doctor skill's instructions match the CLI they drive
     Then the inspection succeeds whatever it finds
     And its verdict is one the skill documents
 
-  # The skill's standing rule is "never invent a fix — if nothing matched, route
-  # the user upstream". That rule is only followable if the address the CLI hands
-  # over is one the skill's own routing table gives, so this is the last claim in
-  # `reference.md` that the binary can be held to.
+  # When nothing matched, the skill sends the user upstream. That is only
+  # followable if the address the CLI hands over is one `reference.md`'s
+  # Framework routing section lists, so this is the last claim in `reference.md`
+  # that the binary can be held to.
   #
   # The scenario is about the ADDRESS, not about nothing having matched. Whether
   # a report goes unexplained is not a property this suite can hold still: the

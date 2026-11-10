@@ -301,8 +301,8 @@ constants, so editing one of those in `reference.md` starts being checked with
 no code change, and every one of those parsers asserts it found something — a
 heading it depends on being reworded upstream must fail loudly rather than
 quietly reduce an assertion to a no-op. Free-standing prose outside those
-spots — such as the Linux-only/Windows-only recap line under the table — is
-not parsed, so it can drift without failing anything here. Two counts are
+spots — such as the paragraph on the unused `fix-20` number under the table —
+is not parsed, so it can drift without failing anything here. Two counts are
 checked outside this feature by
 [skill_reference.rs](tests/skill_reference.rs): the failure-mode count in the
 catalog heading, and SKILL.md's "The other N ... print-only" count. Two
