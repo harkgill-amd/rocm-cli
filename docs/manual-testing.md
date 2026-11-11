@@ -1556,3 +1556,33 @@ anything.
 Finally, `rocm diagnose --report --model <owner>/<repo>:Q4_K_M --context-size
 8192` prints the report with no model section, and stderr says that `--model,
 --context-size were ignored` and nothing about the model was fetched.
+
+## 13. Pasting An Error Into `rocm diagnose`
+
+`rocm diagnose --symptom-file` takes a pasted error without shell quoting.
+Copy a line that would break an argument, for example:
+
+```text
+-v "HSA_STATUS_ERROR_INVALID_ISA" isn't it? $(echo ran > ran.txt) & echo ran > ran.txt
+```
+
+Then, in an empty directory, hand it over in each shell you have:
+
+- bash (Linux or WSL): run `rocm diagnose --symptom-file - <<'EOF'`, paste,
+  then type `EOF` on its own line.
+- PowerShell: `Get-Clipboard | rocm diagnose --symptom-file -`.
+- cmd.exe: save the paste to `error.txt` with an editor, then
+  `rocm diagnose --symptom-file error.txt`.
+- Any shell, nothing piped in: `rocm diagnose --symptom-file -`, paste at the
+  prompt, and end the input as the hint printed on the first line says.
+
+Expected result:
+
+- Each run reports the same causes as `rocm diagnose --symptom-file error.txt`
+  with the paste saved in `error.txt`, and exits 0.
+- No `ran.txt` appears in the directory.
+- `rocm diagnose --symptom-file no-such-file.txt` and the same flag on a binary
+  file (an image, say) each print one error naming the file and why, then the
+  `Usage: rocm diagnose` line, and exit 2.
+- In Windows PowerShell 5.1, `Get-Clipboard > error.txt` writes UTF-16; the
+  same command reading that file still reports the same causes.

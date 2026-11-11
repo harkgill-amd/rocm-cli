@@ -677,7 +677,7 @@ pub(crate) fn command_parts(raw: &str) -> Vec<String> {
         }
         let mut command = command.to_owned();
         for marker in [
-            " >> ", " > ", " < ", " 2>", " (", " —", " –", " → ", " before ", " then ",
+            " >> ", " > ", " <<", " < ", " 2>", " (", " —", " –", " → ", " before ", " then ",
         ] {
             if let Some(position) = command.find(marker) {
                 command.truncate(position);
@@ -2107,6 +2107,29 @@ fn every_command_in_a_shell_list_is_checked() {
         command_parts("rocm serve <a | b> [--x | --y] && rocm examine"),
         vec!["rocm serve <a | b> [--x | --y]", "rocm examine"]
     );
+}
+
+/// A heredoc is a redirection like ` < file`: `rocm diagnose --symptom-file -
+/// <<'EOF'` hands the command a paste on standard input, so the `<<` and its
+/// delimiter are not arguments.
+#[test]
+fn a_heredoc_ends_the_command() {
+    for raw in [
+        "rocm diagnose --symptom-file - <<'EOF'",
+        "rocm diagnose --symptom-file - <<\"EOF\"",
+        "rocm diagnose --symptom-file - << EOF",
+        "rocm diagnose --symptom-file - <<EOF",
+    ] {
+        assert_eq!(
+            command_parts(raw),
+            vec!["rocm diagnose --symptom-file -"],
+            "{raw}"
+        );
+        assert!(
+            findings(&[fixture(raw, Surface::CommandLine)]).is_empty(),
+            "{raw}"
+        );
+    }
 }
 
 /// Prose may follow a command after an em dash, an en dash or an arrow

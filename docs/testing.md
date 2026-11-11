@@ -4364,6 +4364,60 @@ Windows:
 cargo xtask e2e -- -n '(diagnose-48)'
 ```
 
+## Symptom From A File Or Standard Input
+
+`rocm diagnose --symptom-file <PATH>` reads the symptom from a file, or from
+standard input when PATH is `-`, so a pasted error never passes through a
+shell's argument parser. How the bytes become the `--symptom` string (one
+trailing line break removed, a UTF-8 byte-order mark dropped, UTF-16 with a
+byte-order mark decoded, anything else UTF-8 or a usage error) is in
+[symptom_input.rs](../apps/rocm/src/symptom_input.rs), and its unit tests there
+pin each rule, including that a paste full of quotes, `$(...)`, a backtick and a
+leading `-` comes back byte for byte. The clap rules (the two flags exclude each
+other, `-` is accepted as a path, a leading `-` is refused as `--symptom`'s
+value) are pinned by
+`diagnose_takes_the_symptom_from_a_file_or_stdin_but_not_with_symptom` in
+[cli.rs](../apps/rocm/src/cli.rs).
+
+```bash
+cargo nextest run -p rocm -E 'test(symptom)'
+```
+
+Three scenarios in
+[diagnose.feature](../tests/e2e-cucumber/features/diagnose.feature), with their
+steps in
+[symptom_file_steps.rs](../tests/e2e-cucumber/tests/e2e/symptom_file_steps.rs),
+hold the behaviour end to end, GPU or not:
+
+- `diagnose-59` pipes a hostile paste through the platform's own shells (bash
+  on Linux and WSL; cmd.exe and Windows PowerShell on Windows) and requires
+  each diagnosis to equal the one for the same text passed as a single
+  argument with no shell in between: every cause, score and piece of
+  evidence. The paste carries commands that would create a marker file if a
+  shell ran them, and the scenario requires the file to be absent and every
+  run to exit 0. Windows PowerShell's pipe appends a line break, so that run
+  also covers the trimming.
+- `diagnose-60` (Linux and WSL lanes only, like every pseudo-terminal
+  scenario here; the Windows key is checked by hand in
+  [manual-testing.md](manual-testing.md) section 13) runs
+  `rocm diagnose --symptom-file -` on a pseudo-terminal,
+  requires the hint telling the user how to end the paste on the screen the
+  CLI shows while it waits (the report printed later is taller than the
+  pseudo-terminal's fixed screen and scrolls the hint away), then types the
+  paste and the end-of-input key the hint names (Ctrl-D on Linux, Ctrl-Z then
+  Enter on Windows) and requires the report to close with the same verdict
+  (the `rocm fix` it names) as the argument form at `--top 1`.
+- `diagnose-61` points the flag at a missing file and at one that is not
+  UTF-8, and requires a usage error (exit code 2) that names the file and the
+  reason, with nothing on stdout.
+
+None of them asserts which catalog entry matched, for the reason given at the
+top of that feature file: they compare two routes on the same host.
+
+```bash
+cargo xtask e2e -- -n 'diagnose-(59|60|61) '
+```
+
 ## Model Fit Preflight
 
 `rocm diagnose --model <ref>` answers whether a model will run on this host
