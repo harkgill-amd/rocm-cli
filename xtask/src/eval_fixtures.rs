@@ -214,14 +214,16 @@ fn load_examination(root: &Path) -> Result<rocm_core::Examination> {
 /// probe's own rule, never typed.
 fn examination_for(base: &rocm_core::Examination, host: Host) -> rocm_core::Examination {
     let mut examination = base.clone();
+    // Every host states each field it depends on, so what comes out never depends
+    // on what the recorded examination happened to hold for it.
+    examination.is_wsl = host == Host::WslHostGpuHidden;
+    examination.wsl = None;
+    examination.has_amd_gpu = host == Host::AmdFound;
+    examination.has_discrete_amd = host == Host::AmdFound;
+    examination.gpus = Vec::new();
     match host {
-        Host::NoAmdGpu | Host::ExamineFails => {
-            examination.is_wsl = false;
-            examination.has_amd_gpu = false;
-        }
+        Host::NoAmdGpu | Host::ExamineFails => {}
         Host::WslHostGpuHidden => {
-            examination.is_wsl = true;
-            examination.has_amd_gpu = false;
             // A WSL2 distro whose Windows host exposes a GPU to it (`/dev/dxg`,
             // DXCore) but not an AMD one, so nothing ROCm-side is installed. Typed,
             // not probed: the probe fills this from the distro it runs in.
@@ -234,13 +236,12 @@ fn examination_for(base: &rocm_core::Examination, host: Host) -> rocm_core::Exam
             });
         }
         Host::AmdFound => {
-            examination.is_wsl = false;
-            examination.has_amd_gpu = true;
-            examination.has_discrete_amd = true;
+            // `pci_id` is what the Linux probe reads: the bus address that starts
+            // the `lspci` line.
             examination.gpus = vec![rocm_core::examine::Gpu {
                 name: "AMD Radeon RX 7900 XTX".to_owned(),
                 gfx_target: "gfx1100".to_owned(),
-                pci_id: "1002:744c".to_owned(),
+                pci_id: "0000:c3:00.0".to_owned(),
                 is_apu: Some(false),
                 is_amd: true,
             }];
@@ -495,10 +496,6 @@ mod tests {
                 serde_json::from_str(&examine.stdout).expect("an examination is JSON");
             assert_eq!(value["status"], status, "{}", case.id);
             assert_eq!(value["has_amd_gpu"], has_amd_gpu, "{}", case.id);
-            // The status in the file is what the probe's own rule says for the
-            // edited fields, not text typed beside them.
-            let examination = examination_for(&recorded, host);
-            assert_eq!(examination.status, examination.compute_status());
         }
         for host in [
             Host::NoAmdGpu,
@@ -507,6 +504,35 @@ mod tests {
             Host::ExamineFails,
         ] {
             assert!(seen.contains(&host), "no case replays the host {host:?}");
+        }
+    }
+
+    #[test]
+    fn a_host_does_not_depend_on_what_the_recorded_examination_held() {
+        // A base that says the opposite of every host, so a host that forgot to
+        // state a field would show the base's value instead of its own. The
+        // recorded examination alone cannot tell: it already is a Linux host with
+        // no AMD GPU, so emptying the `NoAmdGpu` arm changed nothing there.
+        let root = paths::workspace_root().expect("workspace root");
+        let mut hostile = load_examination(&root).expect("examination");
+        hostile.is_wsl = true;
+        hostile.has_amd_gpu = true;
+        hostile.has_discrete_amd = true;
+        hostile.gpus = vec![rocm_core::examine::Gpu::default()];
+        hostile.wsl = Some(rocm_core::examine::WslFacts::default());
+        hostile.status = "degraded".to_owned();
+        for (host, is_wsl, has_amd_gpu, gpus, has_wsl_facts, status) in [
+            (Host::NoAmdGpu, false, false, 0, false, "no-amd-gpu"),
+            (Host::WslHostGpuHidden, true, false, 0, true, "wsl"),
+            (Host::AmdFound, false, true, 1, false, "ok"),
+        ] {
+            let examination = examination_for(&hostile, host);
+            assert_eq!(examination.is_wsl, is_wsl, "{host:?}");
+            assert_eq!(examination.has_amd_gpu, has_amd_gpu, "{host:?}");
+            assert_eq!(examination.has_discrete_amd, has_amd_gpu, "{host:?}");
+            assert_eq!(examination.gpus.len(), gpus, "{host:?}");
+            assert_eq!(examination.wsl.is_some(), has_wsl_facts, "{host:?}");
+            assert_eq!(examination.status, status, "{host:?}");
         }
     }
 
